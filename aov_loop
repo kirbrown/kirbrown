@@ -1,0 +1,80 @@
+library(reshape2)
+library(tidyverse)
+
+int <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set1_1_stats.csv")
+sys <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set2_2_stats.csv")
+uri <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set3_2_stats.csv")
+
+# join data sets
+data <- full_join(int,sys, by = "compound")
+data <- full_join(data, uri, by = "compound")
+
+# generate metadata from 
+meta <- mySplit(names(data))
+
+# scale data & transform
+data <- mavPlot(data, scale="row", pCalc = F)
+data <- data %>% remove_rownames()
+data <- data %>% column_to_rownames(var="compound")
+t_data <- as.data.frame(t(data))
+t_data <- t_data %>% rownames_to_column(var="smp")
+
+# generate sample info from metadata
+meta <- data.frame(t(matrix(unlist(strsplit(meta[-1], "_")), nrow = 5)), 
+                   stringsAsFactors = F)
+names(meta) <- c("site", "hyg", "age", "sex", "rep")
+meta <- meta %>% mutate(meta, smp = paste(site, hyg, age, sex, rep, sep="_"))
+meta <- meta %>% mutate(stage = case_when(hyg=='xsdm' ~ 'adultcolonized',
+                                          hyg=='xspf' ~ 'adultcolonized',
+                                          hyg=='xgf' ~ 'adultcolonized',
+                                          age=='12' ~ 'adult',
+                                          age=="8" ~ 'adult',
+                                          age=="3" ~ 'young'))
+test <- meta %>% arrange(stage)
+meta_data <- merge(meta, t_data, by="smp")
+
+# gather by metabolite and value
+all_data_long <- meta_data %>% gather(metabolite, value, -smp, -site, -hyg, -age, -sex, -rep, -stage)
+all_data_long_site <- all_data_long %>% mutate(all_data_long, site_meta = paste(site, metabolite, sep="_"))
+
+all_data_long_site_age <- all_data_long_site %>% mutate(all_data_long, site_meta_age = paste(site_meta, stage, sep="_"))
+
+all_data <- all_data_long_site_age %>% arrange(site_meta_age)
+
+# run ANOVA on each metabolite by site_meta_age
+test <- all_data %>%
+ group_split(site_meta_age, .keep = FALSE) %>%
+ map(~TukeyHSD(aov(value ~ hyg, data = .)))
+
+factors <- as.data.frame(unique(all_data$site_meta_age))
+factors <- rownames_to_column(factors)
+colnames(factors) <- c("model", "site_age_meta")
+factors$model <- as.numeric(factors$model)
+
+## Tukey Post-Hoc test
+#object to store the overall table:
+table_full <- NULL
+# loop all elements in the list
+for(i in 1:length(test))
+{
+tukey <- test[[i]]
+factor_table <- unlist(lapply(tukey, function(x) nrow(x)))
+factor_table <- rep(names(factor_table), factor_table)
+tukey_bound <- NULL
+for (j in 1:length(tukey))
+{
+tukey_bound <- rbind(tukey_bound, tukey[[j]])
+}
+pairs <- rownames(tukey_bound)
+rownames(tukey_bound) <- NULL
+tukey_bound <- as.data.frame(tukey_bound)
+# add a column indicating the parameter that is compaired
+tukey_bound$parameter <- factor_table
+# add a column with the pairs of levels that are compaired
+tukey_bound$pairs <- pairs
+# add column with the model number, which corresponds to the index of the list of TukeyHSD test objects
+tukey_bound$model <- i
+table_full <- rbind(table_full, tukey_bound)
+}
+
+output <- full_join(factors, table_full, by = "model")
