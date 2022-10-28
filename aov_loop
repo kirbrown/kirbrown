@@ -1,80 +1,68 @@
-library(reshape2)
+# A for loop to generate adjusted R2 values for a several observations across several groups of samples
+
+library(pheatmap)
 library(tidyverse)
 
-int <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set1_1_stats.csv")
-sys <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set2_2_stats.csv")
-uri <- readPeak("C:/Users/Kirsty/Documents/Calgary/metabolomics/1909/set3_2_stats.csv")
+#input data is samples in rows and observations in columns
 
-# join data sets
-data <- full_join(int,sys, by = "compound")
-data <- full_join(data, uri, by = "compound")
+# remove unwanted samples
+data <- data %>% filter(!grepl(c("xs"), sample))
 
-# generate metadata from 
-meta <- mySplit(names(data))
+# generate metadata
+data <- data %>% separate(sample, into=c("site", "hyg" ,"age", "sex", "rep"), remove=F) 
 
-# scale data & transform
-data <- mavPlot(data, scale="row", pCalc = F)
-data <- data %>% remove_rownames()
-data <- data %>% column_to_rownames(var="compound")
-t_data <- as.data.frame(t(data))
-t_data <- t_data %>% rownames_to_column(var="smp")
+# generate long data 
+all_data_long <- data %>% gather(metabolite, value, -sample, -site, -hyg, -age, -sex, -rep)
 
-# generate sample info from metadata
-meta <- data.frame(t(matrix(unlist(strsplit(meta[-1], "_")), nrow = 5)), 
-                   stringsAsFactors = F)
-names(meta) <- c("site", "hyg", "age", "sex", "rep")
-meta <- meta %>% mutate(meta, smp = paste(site, hyg, age, sex, rep, sep="_"))
-meta <- meta %>% mutate(stage = case_when(hyg=='xsdm' ~ 'adultcolonized',
-                                          hyg=='xspf' ~ 'adultcolonized',
-                                          hyg=='xgf' ~ 'adultcolonized',
-                                          age=='12' ~ 'adult',
-                                          age=="8" ~ 'adult',
-                                          age=="3" ~ 'young'))
-test <- meta %>% arrange(stage)
-meta_data <- merge(meta, t_data, by="smp")
-
-# gather by metabolite and value
-all_data_long <- meta_data %>% gather(metabolite, value, -smp, -site, -hyg, -age, -sex, -rep, -stage)
-all_data_long_site <- all_data_long %>% mutate(all_data_long, site_meta = paste(site, metabolite, sep="_"))
-
-all_data_long_site_age <- all_data_long_site %>% mutate(all_data_long, site_meta_age = paste(site_meta, stage, sep="_"))
-
+# generate variables required for subsetting
+all_data_long_site <- all_data_long %>% unite(site_meta, "site", "metabolite")#mutate(all_data_long, site_meta = paste(site, metabolite, sep="_"))
+all_data_long_site_age <- all_data_long_site %>% unite(site_meta_age, "site_meta", "age")
 all_data <- all_data_long_site_age %>% arrange(site_meta_age)
 
-# run ANOVA on each metabolite by site_meta_age
-test <- all_data %>%
- group_split(site_meta_age, .keep = FALSE) %>%
- map(~TukeyHSD(aov(value ~ hyg, data = .)))
-
-factors <- as.data.frame(unique(all_data$site_meta_age))
-factors <- rownames_to_column(factors)
-colnames(factors) <- c("model", "site_age_meta")
-factors$model <- as.numeric(factors$model)
-
-## Tukey Post-Hoc test
-#object to store the overall table:
-table_full <- NULL
-# loop all elements in the list
-for(i in 1:length(test))
-{
-tukey <- test[[i]]
-factor_table <- unlist(lapply(tukey, function(x) nrow(x)))
-factor_table <- rep(names(factor_table), factor_table)
-tukey_bound <- NULL
-for (j in 1:length(tukey))
-{
-tukey_bound <- rbind(tukey_bound, tukey[[j]])
-}
-pairs <- rownames(tukey_bound)
-rownames(tukey_bound) <- NULL
-tukey_bound <- as.data.frame(tukey_bound)
-# add a column indicating the parameter that is compaired
-tukey_bound$parameter <- factor_table
-# add a column with the pairs of levels that are compaired
-tukey_bound$pairs <- pairs
-# add column with the model number, which corresponds to the index of the list of TukeyHSD test objects
-tukey_bound$model <- i
-table_full <- rbind(table_full, tukey_bound)
+rsq.outs <- data.frame();
+for (i in unique(all_data_long$metabolite) ){
+    #create a subset data 
+    data_sub <- subset(all_data_long,metabolite==i)
+    # filter non-zeros
+    data_sub <- filter(data_sub, value > 0)
+    # scale data
+    data_sub <- data_sub %>% mutate(across(where(is.numeric), scale))
+    # perform ANOVA across variables of interest
+    lm <- lm(value ~ hyg + age + sex + site, data=data_sub, na.rm=T)
+    # calculate adjusted R2
+    rsq <- as.data.frame(rsq.partial(lm, adj=T))
+    # pull information and store in DF
+    rsq_adj <- rsq$adjustment
+    rsq_var <- rsq$variable
+    rsq_val <- rsq$partial.rsq
+    rsq.out <- data.frame(i, rsq_var, rsq_val)
+    # bind data into prepared DF
+    rsq.outs <- rbind.data.frame(rsq.outs, rsq.out)
 }
 
-output <- full_join(factors, table_full, by = "model")
+# Code to generate heatmap of R2 values
+
+# generate wide data
+rsq.outs.wide <- spread(rsq.outs, i, rsq_val)
+rsq.outs.wide <- as.data.frame(t(rsq.outs.wide))
+rsq.outs.wide <- as.data.frame(row_to_names(rsq.outs.wide, 1))
+
+# change character values to numeric
+char_columns <- sapply(rsq.outs.wide, is.character)            
+data_chars_as_num <- rsq.outs.wide                             
+data_chars_as_num[ , char_columns] <- as.data.frame(   
+  apply(data_chars_as_num[ , char_columns], 2, as.numeric))
+sapply(data_chars_as_num, class)
+
+# generate heatmap
+
+hm <- pheatmap(mat=data_chars_as_num,
+         main = " Partial R2 by Factor across Sites", 
+         #scale="row",
+         #border_colour = "white",
+         cluster_cols=F,
+         cluster_rows=F,
+         display_numbers = T,
+         #gaps_col = c(4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52),
+         color=inferno(8))
+hm
